@@ -1,0 +1,74 @@
+# ==========================================
+# Backend (Python / FastAPI) Git Ignore
+# ==========================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Python virtual environment directories
+backend/.venv/
+backend/venv/
+backend/env/
+backend/ENV/
+
+# Local configuration and environment variables
+backend/.env
+.env
+
+# Local upload files (evidence label photos stored locally)
+backend/uploads/
+
+# Databases
+*.db
+*.sqlite3
+
+# ==========================================
+# Frontend (Node.js / React / Vite) Git Ignore
+# ==========================================
+# Dependency directories
+frontend/node_modules/
+node_modules/
+
+# Production build outputs
+frontend/dist/
+frontend/build/
+dist/
+build/
+
+# Local frontend environment variables
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# Vite and development caches
+frontend/.vite/
+.eslintcache
+
+# ==========================================
+# General / IDEs / Operating Systems
+# ==========================================
+# Logs and runtime databases
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE/Editors settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Diagnostic/System Files
+.DS_Store
+Thumbs.db
+.gemini/
+.agents/
