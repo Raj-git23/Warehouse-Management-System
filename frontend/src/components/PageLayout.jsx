@@ -18,7 +18,7 @@ export const PageLayout = ({ children }) => {
               <Package className="w-5 h-5" />
             </div>
             <span className="font-bold text-slate-800 tracking-tight text-md">
-              VeriFlow
+              {/* Product Verification System */}
             </span>
           </div>
           <div className="flex items-center space-x-2">
@@ -63,12 +63,9 @@ export const PageLayout = ({ children }) => {
           {/* LEFT DESKTOP SIDEBAR */}
           <aside className="hidden md:flex flex-col w-60 bg-white border-r border-slate-200 fixed top-0 bottom-0 left-0 z-40 select-none">
             {/* Logo */}
-            <div className="flex h-16 items-center space-x-2.5 px-6 border-b border-slate-100">
-              <div className="p-2 bg-blue-600 rounded-lg text-white">
-                <Package className="w-5 h-5" />
-              </div>
+            <div className="flex h-auto items-center text-center py-3! space-x-2.5 px-6 border-b border-slate-100">
               <span className="font-bold text-slate-800 tracking-tight text-lg">
-                VeriFlow
+                Product Verification System
               </span>
             </div>
 

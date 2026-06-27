@@ -51,6 +51,20 @@ app.include_router(upload_router, prefix="/api", tags=["CSV Upload"])
 app.include_router(verify_router, prefix="/api", tags=["Product Verification"])
 app.include_router(reports_router, prefix="/api", tags=["Verification Reports"])
 
+@app.on_event("startup")
+async def startup_event():
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        print("\n" + "="*50)
+        print("✅ DATABASE CONNECTED SUCCESSFULLY")
+        print("="*50 + "\n")
+    except Exception as e:
+        print("\n" + "="*50)
+        print("❌ DATABASE CONNECTION FAILED:")
+        print(f"{e}")
+        print("="*50 + "\n")
+
 # Clean shutdown handler to dispose of engine connections
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -1,31 +1,64 @@
-import React, { useState, useRef, useEffect } from "react";
-import { UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle, RefreshCw, FileText, Trash2 } from "lucide-react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle, RefreshCw, FileText, Trash2, Zap, Database, Clock, WifiOff } from "lucide-react";
 import { Progress, Card } from "@radix-ui/themes";
-import { uploadCSV } from "../services/api";
+import { uploadCSV, pollJobStatus, fetchAllJobs } from "../services/api";
 
+// --------------- Constants ---------------
+const POLL_INTERVAL_MS = 4000;       // 4 seconds
+const MAX_POLL_FAILURES = 5;         // stop polling after 5 consecutive failures
+const LOCALSTORAGE_KEY = "active_jobs";
+
+// --------------- localStorage helpers ---------------
+function loadActiveJobs() {
+  try {
+    const saved = localStorage.getItem(LOCALSTORAGE_KEY);
+    return saved ? JSON.parse(saved) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveActiveJobs(jobs) {
+  try {
+    localStorage.setItem(LOCALSTORAGE_KEY, JSON.stringify(jobs));
+  } catch {
+    // localStorage may be full or unavailable — silently ignore
+  }
+}
+
+function addActiveJob(jobId, filename, fileSize) {
+  const current = loadActiveJobs();
+  if (!current.find((j) => j.job_id === jobId)) {
+    current.push({ job_id: jobId, filename, file_size: fileSize });
+    saveActiveJobs(current);
+  }
+}
+
+function removeActiveJob(jobId) {
+  const current = loadActiveJobs();
+  saveActiveJobs(current.filter((j) => j.job_id !== jobId));
+}
+
+// --------------- Component ---------------
 export const FileUploadZone = ({ onUploadSuccess }) => {
   const [files, setFiles] = useState([]);
   const [isDragActive, setIsDragActive] = useState(false);
-  const [status, setStatus] = useState("idle"); // idle, uploading, success, error
+  const [status, setStatus] = useState("idle"); // idle, uploading, processing, success, error
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+
+  // Active background jobs being polled
+  const [activeJobs, setActiveJobs] = useState([]);
+  // Map of job_id -> latest poll data
+  const [jobProgress, setJobProgress] = useState({});
+  // Polling refs
+  const pollTimers = useRef({});
+  const pollFailCounts = useRef({});
+
   const [recentUploads, setRecentUploads] = useState(() => {
     const saved = localStorage.getItem("recent_uploads");
-    return saved ? JSON.parse(saved) : [
-      {
-        name: "inventory_2026_06_25.csv",
-        records: "4,520 records",
-        time: "Today, 09:14 AM",
-        status: "Completed"
-      },
-      {
-        name: "inventory_2026_06_24.csv",
-        records: "3,890 records",
-        time: "Yesterday, 04:30 PM",
-        status: "Completed"
-      }
-    ];
+    return saved ? JSON.parse(saved) : [];
   });
 
   const fileInputRef = useRef(null);
@@ -34,12 +67,205 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
     localStorage.setItem("recent_uploads", JSON.stringify(recentUploads));
   }, [recentUploads]);
 
+  // --------------- Page-load recovery ---------------
+  useEffect(() => {
+    recoverJobs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cleanup all polling on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(pollTimers.current).forEach(clearInterval);
+    };
+  }, []);
+
+  const recoverJobs = async () => {
+    try {
+      // Get jobs from both localStorage and backend
+      const localJobs = loadActiveJobs();
+      let backendJobs = [];
+
+      try {
+        const data = await fetchAllJobs();
+        backendJobs = data.jobs || [];
+      } catch {
+        // Backend may be down — just use localStorage
+      }
+
+      // Merge: find any active jobs from either source
+      const activeJobIds = new Set();
+      const jobsToTrack = [];
+
+      // Add backend active jobs
+      for (const job of backendJobs) {
+        if (job.status === "pending" || job.status === "uploading" || job.status === "processing") {
+          if (!activeJobIds.has(job.job_id)) {
+            activeJobIds.add(job.job_id);
+            jobsToTrack.push(job);
+          }
+        }
+      }
+
+      // Add localStorage active jobs not already tracked
+      for (const localJob of localJobs) {
+        if (!activeJobIds.has(localJob.job_id)) {
+          // Verify it still exists on backend
+          try {
+            const jobData = await pollJobStatus(localJob.job_id);
+            if (jobData.status === "pending" || jobData.status === "uploading" || jobData.status === "processing") {
+              activeJobIds.add(localJob.job_id);
+              jobsToTrack.push(jobData);
+            } else {
+              // Job completed/failed — clean from localStorage
+              removeActiveJob(localJob.job_id);
+            }
+          } catch {
+            // Job not found — clean from localStorage
+            removeActiveJob(localJob.job_id);
+          }
+        }
+      }
+
+      if (jobsToTrack.length > 0) {
+        // We have in-progress jobs — show processing state and start polling
+        setActiveJobs(jobsToTrack);
+        setStatus("processing");
+
+        const progressMap = {};
+        for (const job of jobsToTrack) {
+          progressMap[job.job_id] = job;
+          startPolling(job.job_id);
+        }
+        setJobProgress(progressMap);
+      }
+    } catch (err) {
+      console.error("Failed to recover jobs:", err);
+    }
+  };
+
+  // --------------- Polling ---------------
+  const startPolling = useCallback((jobId) => {
+    // Don't start duplicate timers
+    if (pollTimers.current[jobId]) return;
+
+    pollFailCounts.current[jobId] = 0;
+    let currentInterval = POLL_INTERVAL_MS;
+
+    const doPoll = async () => {
+      try {
+        const data = await pollJobStatus(jobId);
+        pollFailCounts.current[jobId] = 0;
+
+        // Reset interval to normal after successful poll
+        if (currentInterval !== POLL_INTERVAL_MS) {
+          currentInterval = POLL_INTERVAL_MS;
+          clearInterval(pollTimers.current[jobId]);
+          pollTimers.current[jobId] = setInterval(doPoll, currentInterval);
+        }
+
+        // Update progress
+        setJobProgress((prev) => ({ ...prev, [jobId]: data }));
+
+        if (data.status === "completed" || data.status === "failed") {
+          // Stop polling
+          clearInterval(pollTimers.current[jobId]);
+          delete pollTimers.current[jobId];
+          removeActiveJob(jobId);
+
+          // Handle completion
+          handleJobFinished(jobId, data);
+        }
+      } catch (err) {
+        pollFailCounts.current[jobId] = (pollFailCounts.current[jobId] || 0) + 1;
+        const fails = pollFailCounts.current[jobId];
+
+        if (fails >= MAX_POLL_FAILURES) {
+          // Stop polling, show error
+          clearInterval(pollTimers.current[jobId]);
+          delete pollTimers.current[jobId];
+
+          setJobProgress((prev) => ({
+            ...prev,
+            [jobId]: {
+              ...(prev[jobId] || {}),
+              _connectionLost: true,
+            },
+          }));
+        } else {
+          // Exponential backoff: 4s → 8s → 16s
+          const newInterval = POLL_INTERVAL_MS * Math.pow(2, fails);
+          if (newInterval !== currentInterval) {
+            currentInterval = newInterval;
+            clearInterval(pollTimers.current[jobId]);
+            pollTimers.current[jobId] = setInterval(doPoll, currentInterval);
+          }
+        }
+      }
+    };
+
+    // Initial poll immediately
+    doPoll();
+    pollTimers.current[jobId] = setInterval(doPoll, currentInterval);
+  }, []);
+
+  const handleJobFinished = (jobId, data) => {
+    if (data.status === "completed") {
+      const finalResult = {
+        success: true,
+        total_rows: data.total_rows,
+        inserted: data.inserted,
+        skipped: data.skipped,
+        error: data.error, // may contain partial error summary
+        details: [{
+          filename: data.filename,
+          success: true,
+          total_rows: data.total_rows,
+          inserted: data.inserted,
+          skipped: data.skipped,
+        }],
+      };
+
+      setResult(finalResult);
+      setStatus("success");
+      saveToRecentUploads(finalResult);
+
+      if (onUploadSuccess) {
+        onUploadSuccess(finalResult);
+      }
+    } else if (data.status === "failed") {
+      setError(data.error || "Processing failed.");
+      setStatus("error");
+    }
+
+    // Remove from active tracking
+    setActiveJobs((prev) => prev.filter((j) => j.job_id !== jobId));
+  };
+
+  const retryPoll = (jobId) => {
+    pollFailCounts.current[jobId] = 0;
+    setJobProgress((prev) => {
+      const updated = { ...prev };
+      if (updated[jobId]) {
+        updated[jobId] = { ...updated[jobId], _connectionLost: false };
+      }
+      return updated;
+    });
+    startPolling(jobId);
+  };
+
+  // --------------- File handling ---------------
   const formatBytes = (bytes) => {
     if (bytes === 0) return "0 Bytes";
     const k = 1024;
     const sizes = ["Bytes", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  };
+
+  const formatNumber = (n) => {
+    if (n === undefined || n === null) return "0";
+    return n.toLocaleString();
   };
 
   const handleDrag = (e) => {
@@ -73,7 +299,6 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
 
     if (validFiles.length > 0) {
       setFiles((prev) => {
-        // Prevent duplicate file entries by name
         const existingNames = new Set(prev.map((f) => f.name));
         const filteredNew = validFiles.filter((f) => !existingNames.has(f.name));
         return [...prev, ...filteredNew];
@@ -102,7 +327,7 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
   };
 
   const handleButtonClick = () => {
-    if (status === "uploading") return;
+    if (status === "uploading" || status === "processing") return;
     fileInputRef.current.click();
   };
 
@@ -110,64 +335,140 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
     setFiles((prev) => prev.filter((_, idx) => idx !== index));
   };
 
+  /** Save completed upload(s) to recent uploads history */
+  const saveToRecentUploads = (data) => {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    let newUploads = [];
+
+    if (data.details && data.details.length > 0) {
+      newUploads = data.details.map((detail) => {
+        const recordsStr = detail.success
+          ? `${detail.inserted.toLocaleString()} records`
+          : "Failed";
+
+        let uploadStatus = "Failed";
+        if (detail.success) {
+          uploadStatus = detail.skipped > 0 ? "Warning" : "Completed";
+        }
+
+        return {
+          name: detail.filename,
+          records: recordsStr,
+          time: `Today, ${timeStr}`,
+          status: uploadStatus
+        };
+      });
+    }
+
+    if (newUploads.length > 0) {
+      setRecentUploads(prev => [...newUploads, ...prev].slice(0, 8));
+    }
+  };
+
+  // --------------- Upload handler ---------------
   const handleUpload = async () => {
     if (files.length === 0) return;
 
     setStatus("uploading");
     setProgress(0);
+    setError("");
 
     try {
       const data = await uploadCSV(files, (percent) => {
         setProgress(percent);
       });
 
-      setResult(data);
-      setStatus("success");
+      // All files go through background processing
+      const jobs = data.jobs || [];
+      const successJobs = jobs.filter((j) => j.success && j.job_id);
+      const failedJobs = jobs.filter((j) => !j.success);
+      const duplicateJobs = jobs.filter((j) => j.duplicate);
 
-      // Save to recent uploads history
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-      const newUploads = files.map((file) => {
-        const fileDetail = data.details?.find((d) => d.filename === file.name);
-        const recordsStr = fileDetail && fileDetail.success
-          ? `${fileDetail.inserted.toLocaleString()} records`
-          : "Failed";
-
-        let status = "Failed";
-        if (fileDetail && fileDetail.success) {
-          status = fileDetail.skipped > 0 ? "Warning" : "Completed";
-        }
-
-        return {
-          name: file.name,
-          records: recordsStr,
-          time: `Today, ${timeStr}`,
-          status: status
-        };
-      });
-
-      setRecentUploads(prev => [...newUploads, ...prev].slice(0, 8));
-
-      if (onUploadSuccess) {
-        onUploadSuccess(data);
+      if (successJobs.length === 0 && failedJobs.length > 0) {
+        setError(failedJobs.map((j) => `${j.filename}: ${j.error}`).join("; "));
+        setStatus("error");
+        return;
       }
+
+      // Track all new + duplicate jobs
+      const jobsToTrack = successJobs.map((j) => ({
+        job_id: j.job_id,
+        filename: j.filename,
+        status: j.status,
+        duplicate: j.duplicate || false,
+      }));
+
+      setActiveJobs(jobsToTrack);
+      setStatus("processing");
+      setProgress(100); // upload bytes sent — now processing
+
+      // Save to localStorage and start polling for each
+      for (const job of jobsToTrack) {
+        const file = files.find((f) => f.name === job.filename);
+        addActiveJob(job.job_id, job.filename, file?.size || 0);
+        startPolling(job.job_id);
+      }
+
+      // Show duplicate notifications
+      if (duplicateJobs.length > 0) {
+        const dupNames = duplicateJobs.map((j) => j.filename).join(", ");
+        console.info(`Duplicate upload detected for: ${dupNames}. Tracking existing jobs.`);
+      }
+
     } catch (err) {
       console.error(err);
-      const errMsg = err.response?.data?.detail || "Upload failed. Please check your network and files format.";
-      setError(errMsg);
+      const errMsg = err.response?.data?.detail || "Upload failed. Please check your network and file format.";
+      setError(typeof errMsg === "string" ? errMsg : JSON.stringify(errMsg));
       setStatus("error");
     }
   };
 
   const handleReset = () => {
+    // Stop all polling
+    Object.values(pollTimers.current).forEach(clearInterval);
+    pollTimers.current = {};
+    pollFailCounts.current = {};
+
     setFiles([]);
     setStatus("idle");
     setProgress(0);
     setError("");
     setResult(null);
+    setActiveJobs([]);
+    setJobProgress({});
   };
 
+  // --------------- Computed values ---------------
+  // Aggregate progress from all active jobs
+  const aggregateProgress = () => {
+    const allData = Object.values(jobProgress);
+    if (allData.length === 0) return null;
+
+    let totalRows = 0;
+    let processedRows = 0;
+    let inserted = 0;
+    let skipped = 0;
+
+    for (const data of allData) {
+      totalRows += data.total_rows || 0;
+      processedRows += data.processed_rows || 0;
+      inserted += data.inserted || 0;
+      skipped += data.skipped || 0;
+    }
+
+    const percent = totalRows > 0
+      ? Math.min(Math.round((processedRows / totalRows) * 100), 100)
+      : 0;
+
+    return { totalRows, processedRows, inserted, skipped, percent };
+  };
+
+  const hasConnectionLost = Object.values(jobProgress).some((j) => j._connectionLost);
+  const agg = aggregateProgress();
+
+  // --------------- Render ---------------
   return (
     <div className="space-y-6 w-full max-w-3xl mx-auto">
       {/* CARD 2: Upload File card matching the layout */}
@@ -223,11 +524,11 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
           )}
 
           {/* Selected files preview list */}
-          {files.length > 0 && status !== "success" && (
+          {files.length > 0 && status !== "success" && status !== "processing" && (
             <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
               {files.map((file, idx) => (
-                <div key={idx} className="flex items-center justify-between p-3 bg-slate-50 border border-slate-150 rounded-xl">
-                  <div className="flex items-center space-x-3 min-w-0">
+                <div key={idx} className="flex items-center justify-between p-3 bg-slate-50 border border-slate-150 rounded-xl gap-2">
+                  <div className="flex items-center space-x-3 min-w-0 flex-1">
                     <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-600 flex-shrink-0">
                       <FileSpreadsheet className="w-4 h-4" />
                     </div>
@@ -265,17 +566,136 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
             </button>
           )}
 
-          {/* Ingesting progression */}
+          {/* Uploading (sending bytes to server) */}
           {status === "uploading" && (
             <div className="space-y-3 bg-slate-50 p-4 border border-slate-150 rounded-xl">
               <div className="flex items-center justify-between text-xs font-bold text-slate-600">
                 <span className="flex items-center gap-2">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />
-                  Ingesting {files.length} files...
+                  <UploadCloud className="w-3.5 h-3.5 animate-pulse text-blue-600" />
+                  Uploading {files.length} file{files.length > 1 ? 's' : ''} to server...
                 </span>
                 <span>{progress}%</span>
               </div>
               <Progress value={progress} size="2" color="blue" className="w-full h-1.5 rounded" />
+              <p className="text-[10px] text-slate-400 font-semibold">
+                Sending file data to server. Processing will begin automatically.
+              </p>
+            </div>
+          )}
+
+          {/* Processing (background jobs with polling progress) */}
+          {status === "processing" && (
+            <div className="space-y-4 bg-gradient-to-br from-indigo-50/40 via-blue-50/30 to-violet-50/20 p-5 border border-indigo-100/60 rounded-xl">
+              {/* Header */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <div className="relative">
+                    <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center">
+                      <Database className="w-4 h-4 text-indigo-600" />
+                    </div>
+                    {!hasConnectionLost && (
+                      <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white animate-pulse" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider truncate">Processing in Background</h4>
+                    <p className="text-[10px] text-slate-500 font-semibold mt-0.5 truncate">
+                      {activeJobs.length === 1
+                        ? (activeJobs[0].filename || files[0]?.name || "CSV file")
+                        : `${activeJobs.length} files`
+                      }
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 px-2 py-1 bg-indigo-100/70 rounded-md">
+                  {hasConnectionLost ? (
+                    <>
+                      <WifiOff className="w-3 h-3 text-rose-500" />
+                      <span className="text-[10px] font-bold text-rose-600 uppercase">Offline</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-3 h-3 text-indigo-600 animate-pulse" />
+                      <span className="text-[10px] font-bold text-indigo-700 uppercase">Live</span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Deterministic progress bar */}
+              {agg && agg.totalRows > 0 ? (
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500">
+                    <span>{formatNumber(agg.processedRows)} / {formatNumber(agg.totalRows)} rows</span>
+                    <span>{agg.percent}%</span>
+                  </div>
+                  <Progress value={agg.percent} size="2" color="indigo" className="w-full h-2 rounded" />
+                </div>
+              ) : (
+                <div className="relative w-full h-2 bg-indigo-100/60 rounded-full overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-r from-indigo-400 via-blue-500 to-indigo-400 rounded-full animate-indeterminate" />
+                </div>
+              )}
+
+              {/* Connection lost warning */}
+              {hasConnectionLost && (
+                <div className="flex items-center justify-between bg-rose-50 border border-rose-100 rounded-lg p-3">
+                  <div className="flex items-center gap-2">
+                    <WifiOff className="w-4 h-4 text-rose-500" />
+                    <span className="text-xs font-bold text-rose-700">Connection lost. Processing may still continue on the server.</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      for (const job of activeJobs) {
+                        retryPoll(job.job_id);
+                      }
+                    }}
+                    className="px-3 py-1.5 text-[10px] font-bold bg-white border border-rose-200 text-rose-700 rounded-md hover:bg-rose-50 cursor-pointer transition-colors"
+                  >
+                    Check Status
+                  </button>
+                </div>
+              )}
+
+              {/* Live Stats Grid */}
+              {agg && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div className="bg-white/80 backdrop-blur-sm p-3 border border-slate-100/60 rounded-lg text-center shadow-sm">
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Processed</p>
+                    <p className="text-lg font-bold text-slate-800 tabular-nums leading-tight">
+                      {formatNumber(agg.processedRows)}
+                    </p>
+                  </div>
+                  <div className="bg-white/80 backdrop-blur-sm p-3 border border-emerald-100/60 rounded-lg text-center shadow-sm">
+                    <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-widest mb-1">Inserted</p>
+                    <p className="text-lg font-bold text-emerald-600 tabular-nums leading-tight">
+                      {formatNumber(agg.inserted)}
+                    </p>
+                  </div>
+                  <div className="bg-white/80 backdrop-blur-sm p-3 border border-amber-100/60 rounded-lg text-center shadow-sm">
+                    <p className="text-[9px] font-bold text-amber-500 uppercase tracking-widest mb-1">Skipped</p>
+                    <p className="text-lg font-bold text-amber-600 tabular-nums leading-tight">
+                      {formatNumber(agg.skipped)}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {!agg && (
+                <div className="flex items-center justify-center gap-2 py-3 text-xs font-semibold text-slate-500">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-500" />
+                  Waiting for processing to start...
+                </div>
+              )}
+
+              {/* Info text */}
+              <div className="flex items-center gap-2 justify-center">
+                <Clock className="w-3 h-3 text-slate-400" />
+                <p className="text-[10px] text-slate-400 font-semibold text-center leading-relaxed">
+                  Polling every 4s • {activeJobs.length} active job{activeJobs.length !== 1 ? 's' : ''} • You can safely navigate away
+                </p>
+              </div>
             </div>
           )}
 
@@ -287,7 +707,7 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
             let bannerBg = "bg-emerald-50 border-emerald-100 text-emerald-800";
             let bannerIconColor = "text-emerald-600";
             let BannerIcon = CheckCircle2;
-            let bannerTitle = `Processed ${result.total_files} file${result.total_files > 1 ? 's' : ''} successfully`;
+            let bannerTitle = `Import completed successfully`;
             let bannerDesc = "All product records have been successfully imported into the database.";
 
             if (allSkipped) {
@@ -315,7 +735,7 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
                 </div>
 
                 {/* Main overall counts */}
-                <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
                   <div className="bg-white p-3 border border-slate-100 rounded-lg shadow-sm">
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Total Rows</p>
                     <p className="text-xl font-bold text-slate-800 mt-1">{result.total_rows.toLocaleString()}</p>
@@ -335,8 +755,8 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Upload details:</p>
                   <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                     {result.details?.map((detail, dIdx) => (
-                      <div key={dIdx} className="bg-white/80 p-2.5 rounded-lg border border-slate-100/70 flex items-center justify-between text-xs font-semibold text-slate-700 shadow-inner">
-                        <span className="truncate max-w-[280px]" title={detail.filename}>{detail.filename}</span>
+                      <div key={dIdx} className="bg-white/80 p-2.5 rounded-lg border border-slate-100/70 flex items-center justify-between gap-2 text-xs font-semibold text-slate-700 shadow-inner">
+                        <span className="truncate flex-1 min-w-0" title={detail.filename}>{detail.filename}</span>
                         {detail.success ? (
                           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${detail.skipped > 0
                             ? 'bg-amber-50 text-amber-800 border-amber-100'
@@ -353,6 +773,16 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
                     ))}
                   </div>
                 </div>
+
+                {/* Partial error warning */}
+                {result.error && (
+                  <div className="flex items-start space-x-2 p-3 bg-amber-50 border border-amber-100 rounded-lg">
+                    <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                    <p className="text-[10px] text-amber-700 font-semibold leading-relaxed">
+                      Some batches encountered errors: {result.error}
+                    </p>
+                  </div>
+                )}
 
                 <div className="flex justify-end pt-1">
                   <button
@@ -404,13 +834,18 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
             <p className="text-xs text-slate-400 mt-0.5">History of bulk imports.</p>
           </div>
 
-          <div className="space-y-2.5">
-            {recentUploads.map((up, idx) => (
-              <div
-                key={idx}
-                className="flex items-center justify-between p-3.5 border border-slate-100 rounded-xl bg-white hover:bg-slate-50/50 transition-colors shadow-sm"
-              >
-                <div className="flex items-center space-x-3.5 min-w-0">
+          {recentUploads.length === 0 ? (
+            <div className="text-center py-6">
+              <p className="text-xs text-slate-400 font-semibold">No recent uploads yet.</p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {recentUploads.map((up, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center justify-between gap-2 p-3.5 border border-slate-100 rounded-xl bg-white hover:bg-slate-50/50 transition-colors shadow-sm"
+                >
+                <div className="flex items-center space-x-3.5 min-w-0 flex-1">
                   <div className="p-2 bg-slate-100 rounded-lg text-slate-500 flex-shrink-0">
                     <FileText className="w-4 h-4" />
                   </div>
@@ -431,9 +866,10 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
                     {up.status}
                   </span>
                 </div>
-              </div>
-            ))}
-          </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </Card>
     </div>

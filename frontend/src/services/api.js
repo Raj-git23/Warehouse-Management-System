@@ -6,10 +6,17 @@ const api = axios.create({
   baseURL: API_BASE_URL,
 });
 
+/**
+ * Upload CSV files to the backend.
+ * All files are processed in the background. Returns job_ids for polling.
+ *
+ * @param {File[]} files - Array of File objects to upload
+ * @param {Function} onUploadProgress - Callback for HTTP upload % (bytes sent)
+ * @returns {Object} Response data with jobs array
+ */
 export const uploadCSV = async (files, onUploadProgress) => {
   const formData = new FormData();
   
-  // Check if files is a FileList or Array, and append each
   if (files instanceof FileList || Array.isArray(files)) {
     Array.from(files).forEach((file) => {
       formData.append("files", file);
@@ -22,6 +29,8 @@ export const uploadCSV = async (files, onUploadProgress) => {
     headers: {
       "Content-Type": "multipart/form-data",
     },
+    // Disable default timeout for large file uploads
+    timeout: 0,
     onUploadProgress: (progressEvent) => {
       if (onUploadProgress && progressEvent.total) {
         const percentCompleted = Math.round(
@@ -31,6 +40,29 @@ export const uploadCSV = async (files, onUploadProgress) => {
       }
     },
   });
+  return response.data;
+};
+
+/**
+ * Poll a single job's status.
+ * Frontend calls this every 4 seconds for each active job.
+ *
+ * @param {string} jobId - The job UUID returned by upload-csv
+ * @returns {Object} Job status data
+ */
+export const pollJobStatus = async (jobId) => {
+  const response = await api.get(`/jobs/${jobId}`);
+  return response.data;
+};
+
+/**
+ * Fetch all recent jobs (last 30 minutes).
+ * Called on page load to recover in-progress or recently completed uploads.
+ *
+ * @returns {Object} { jobs: [...] }
+ */
+export const fetchAllJobs = async () => {
+  const response = await api.get("/jobs");
   return response.data;
 };
 

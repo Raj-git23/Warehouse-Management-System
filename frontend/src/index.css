@@ -16,7 +16,7 @@ pre {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
 }
 
-/* Custom micro-animations for VerifyFlow Ops */
+/* Custom micro-animations */
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -42,6 +42,30 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 
 input[type="date"]::-webkit-calendar-picker-indicator:hover {
   transform: scale(1.1);
+}
+
+/* Indeterminate progress bar animation for background processing */
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+    width: 40%;
+  }
+  50% {
+    width: 60%;
+  }
+  100% {
+    transform: translateX(250%);
+    width: 40%;
+  }
+}
+
+.animate-indeterminate {
+  animation: indeterminate 1.8s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+/* Tabular numbers for consistent digit spacing in live counters */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Reset default Vite layout centering styling */

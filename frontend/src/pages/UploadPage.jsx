@@ -16,15 +16,15 @@ export const UploadPage = () => {
       </Box>
 
       {/* CARD 1: CSV Template details matching the screenshot */}
-      <Card size="3" className="shadow-sm border border-slate-100 rounded-xl bg-white p-5">
-        <div className="space-y-4">
+      <Card size="3" className="hidden! lg:flex! shadow-sm border border-slate-100 rounded-xl bg-white p-5 w-full!">
+        <div className="space-y-4 w-full">
           <div>
             <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide">CSV Template</h3>
             <p className="text-xs text-slate-400 mt-0.5">The upload file must contain these columns.</p>
           </div>
 
-          <div className="overflow-x-auto border border-slate-100 rounded-xl">
-            <table className="min-w-full text-xs text-left border-collapse text-slate-700">
+          <div className="overflow-x-auto border border-slate-100 rounded-xl w-full">
+            <table className="min-w-full! text-xs text-left border-collapse text-slate-700">
               <thead>
                 <tr className="bg-slate-50/50 border-b border-slate-100">
                   <th className="py-3.5 px-4 font-bold text-slate-400 font-mono tracking-wider">WID</th>
