@@ -221,18 +221,43 @@ User drops file → Browser sends file to server
 
 ## Local Setup Instructions
 
-### Prerequisites
+You can run the entire application stack either using **Docker** (recommended - zero local database or dependency installation required) or **manually** on your machine.
+
+---
+
+### Option A: Quick Setup with Docker (Recommended)
+This runs the entire stack (Frontend, Backend, and PostgreSQL database) inside isolated containers. 
+
+#### Prerequisites
+*   [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+
+#### Setup & Start
+1. From the root directory, run:
+   ```bash
+   docker compose up --build
+   ```
+2. Once the containers are healthy and running:
+   - **Frontend:** Access the interface at `http://localhost:5173`
+   - **Backend API:** Access the Swagger docs or healthcheck at `http://localhost:8000/api`
+   - **Database:** Runs inside the container. The backend automatically applies all Alembic database schema migrations on startup.
+
+---
+
+### Option B: Manual Setup (Without Docker)
+Use this option to run the services directly on your host machine.
+
+#### Prerequisites
 *   **Python:** version 3.12 or newer
 *   **Node.js & npm:** Node version 18 or newer
-*   **PostgreSQL:** installed and running locally (or a remote PostgreSQL instance like Supabase)
+*   **PostgreSQL:** installed and running locally, or a remote PostgreSQL instance (like Supabase)
 
-### 1. Backend Setup
+#### 1. Backend Setup
 ```bash
 cd backend
 python -m venv .venv
 .\.venv\Scripts\pip.exe install -r requirements.txt
 ```
-Copy `.env.example` to `.env` and set your database URL (the backend will automatically check and create the database if it does not exist on startup):
+Copy `.env.example` to `.env` and set your database URL (the backend automatically creates the database if it doesn't exist on startup):
 ```env
 DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5432/product_verification
 ```
@@ -241,8 +266,9 @@ Start the backend development server:
 ```bash
 .\.venv\Scripts\uvicorn.exe app.main:app --reload --port 8000
 ```
-*(Note: On startup, the backend automatically creates the target database if it is missing, and runs all outstanding Alembic schema migrations—no manual database operations required.)*
-### 3. Frontend Setup
+*(Note: On startup, the backend checks and creates the target database if it is missing, and automatically applies all Alembic migrations.)*
+
+#### 2. Frontend Setup
 ```bash
 cd frontend
 npm install

@@ -1,4 +1,5 @@
 import asyncpg
+import asyncio
 import threading
 from pathlib import Path
 from sqlalchemy.engine.url import make_url
@@ -21,33 +22,46 @@ async def create_db_if_not_exists(database_url: str):
     if not url.database or url.database == "postgres":
         return
 
-    try:
-        conn_args = {
-            "database": "postgres",
-            "host": url.host or "localhost",
-            "port": url.port or 5432,
-            "user": url.username or "postgres",
-        }
-        if url.password:
-            conn_args["password"] = url.password
-
-        # Connect to default database server
-        conn = await asyncpg.connect(**conn_args)
+    # Retry if Postgres container is still starting up
+    retries = 10
+    while retries > 0:
         try:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM pg_database WHERE datname = $1", url.database
-            )
-            if not exists:
-                print(f"Database '{url.database}' does not exist. Creating it automatically...")
-                safe_db_name = url.database.replace('"', '""')
-                await conn.execute(f'CREATE DATABASE "{safe_db_name}"')
-                print(f"Database '{url.database}' created successfully.")
-        finally:
-            await conn.close()
-    except Exception as e:
-        # Silently log and ignore database creation errors since we might be on a restricted-access 
-        # database (e.g. Supabase, hosting provider) where we can't connect to postgres or create databases.
-        print(f"Notice: Automated database creation skipped or failed (might already exist or restricted permissions): {e}")
+            conn_args = {
+                "database": "postgres",
+                "host": url.host or "localhost",
+                "port": url.port or 5432,
+                "user": url.username or "postgres",
+            }
+            if url.password:
+                conn_args["password"] = url.password
+
+            # Connect to default database server
+            conn = await asyncpg.connect(**conn_args)
+            try:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM pg_database WHERE datname = $1", url.database
+                )
+                if not exists:
+                    print(f"Database '{url.database}' does not exist. Creating it automatically...")
+                    safe_db_name = url.database.replace('"', '""')
+                    await conn.execute(f'CREATE DATABASE "{safe_db_name}"')
+                    print(f"Database '{url.database}' created successfully.")
+            finally:
+                await conn.close()
+            return
+        except (asyncpg.PostgresError, OSError) as e:
+            retries -= 1
+            if retries > 0:
+                print(f"Database connection failed, retrying... ({retries} attempts left): {e}")
+                await asyncio.sleep(2)
+            else:
+                print(f"Notice: Automated database creation skipped or failed after multiple retries: {e}")
+                return
+        except Exception as e:
+            print(f"Notice: Automated database creation skipped due to unexpected error: {e}")
+            return
+
+    print("Unable to connect to Postgres after retries; database creation skipped.")
 
 def run_migrations():
     """
