@@ -26,6 +26,8 @@ class JobStatus:
     processed_rows: int = 0
     inserted: int = 0
     skipped: int = 0
+    chunks_total: int = 0
+    chunks_done: int = 0
     error: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
@@ -50,6 +52,8 @@ class JobStatus:
             "processed_rows": self.processed_rows,
             "inserted": self.inserted,
             "skipped": self.skipped,
+            "chunks_total": self.chunks_total,
+            "chunks_done": self.chunks_done,
             "error": self.error,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),

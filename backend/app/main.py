@@ -6,6 +6,7 @@ from sqlalchemy import text
 import uvicorn
 
 from app import config
+from app.db_init import init_database
 from app.database import get_db, engine
 from app.routes.upload import router as upload_router
 from app.routes.verify import router as verify_router
@@ -53,15 +54,18 @@ app.include_router(reports_router, prefix="/api", tags=["Verification Reports"])
 
 @app.on_event("startup")
 async def startup_event():
+    # Automatically initialize database and run migrations
+    await init_database()
+    
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         print("\n" + "="*50)
-        print("✅ DATABASE CONNECTED SUCCESSFULLY")
+        print("DATABASE CONNECTED SUCCESSFULLY")
         print("="*50 + "\n")
     except Exception as e:
         print("\n" + "="*50)
-        print("❌ DATABASE CONNECTION FAILED:")
+        print("DATABASE CONNECTION FAILED:")
         print(f"{e}")
         print("="*50 + "\n")
 

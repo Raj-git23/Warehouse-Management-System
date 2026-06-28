@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle, RefreshCw, FileText, Trash2, Zap, Database, Clock, WifiOff } from "lucide-react";
 import { Progress, Card } from "@radix-ui/themes";
-import { uploadCSV, pollJobStatus, fetchAllJobs } from "../services/api";
+import { uploadCSV, pollJobStatus } from "../services/api";
 
 // --------------- Constants ---------------
 const POLL_INTERVAL_MS = 4000;       // 4 seconds
@@ -82,61 +82,38 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
 
   const recoverJobs = async () => {
     try {
-      // Get jobs from both localStorage and backend
       const localJobs = loadActiveJobs();
-      let backendJobs = [];
+      if (localJobs.length === 0) return;
 
-      try {
-        const data = await fetchAllJobs();
-        backendJobs = data.jobs || [];
-      } catch {
-        // Backend may be down — just use localStorage
-      }
-
-      // Merge: find any active jobs from either source
-      const activeJobIds = new Set();
       const jobsToTrack = [];
+      const progressMap = {};
 
-      // Add backend active jobs
-      for (const job of backendJobs) {
-        if (job.status === "pending" || job.status === "uploading" || job.status === "processing") {
-          if (!activeJobIds.has(job.job_id)) {
-            activeJobIds.add(job.job_id);
-            jobsToTrack.push(job);
-          }
-        }
-      }
-
-      // Add localStorage active jobs not already tracked
+      // Check each local job status against the backend
       for (const localJob of localJobs) {
-        if (!activeJobIds.has(localJob.job_id)) {
-          // Verify it still exists on backend
-          try {
-            const jobData = await pollJobStatus(localJob.job_id);
-            if (jobData.status === "pending" || jobData.status === "uploading" || jobData.status === "processing") {
-              activeJobIds.add(localJob.job_id);
-              jobsToTrack.push(jobData);
-            } else {
-              // Job completed/failed — clean from localStorage
-              removeActiveJob(localJob.job_id);
-            }
-          } catch {
-            // Job not found — clean from localStorage
+        try {
+          const jobData = await pollJobStatus(localJob.job_id);
+          if (
+            jobData.status === "pending" ||
+            jobData.status === "uploading" ||
+            jobData.status === "processing"
+          ) {
+            jobsToTrack.push(jobData);
+            progressMap[localJob.job_id] = jobData;
+            startPolling(localJob.job_id);
+          } else {
+            // Job completed/failed/duplicate — clean from localStorage
             removeActiveJob(localJob.job_id);
           }
+        } catch (err) {
+          // Job not found on backend (e.g. expired) — clean from localStorage
+          removeActiveJob(localJob.job_id);
         }
       }
 
       if (jobsToTrack.length > 0) {
-        // We have in-progress jobs — show processing state and start polling
+        // We have in-progress jobs started by this browser — show processing state
         setActiveJobs(jobsToTrack);
         setStatus("processing");
-
-        const progressMap = {};
-        for (const job of jobsToTrack) {
-          progressMap[job.job_id] = job;
-          startPolling(job.job_id);
-        }
         setJobProgress(progressMap);
       }
     } catch (err) {
@@ -450,19 +427,31 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
     let processedRows = 0;
     let inserted = 0;
     let skipped = 0;
+    let chunksTotal = 0;
+    let chunksDone = 0;
 
     for (const data of allData) {
       totalRows += data.total_rows || 0;
       processedRows += data.processed_rows || 0;
       inserted += data.inserted || 0;
       skipped += data.skipped || 0;
+      chunksTotal += data.chunks_total || 0;
+      chunksDone += data.chunks_done || 0;
     }
 
-    const percent = totalRows > 0
+    // Use chunk-based percentage when chunks are available
+    const chunkPercent = chunksTotal > 0
+      ? Math.min(Math.round((chunksDone / chunksTotal) * 100), 100)
+      : 0;
+
+    // Fallback to row-based percentage
+    const rowPercent = totalRows > 0
       ? Math.min(Math.round((processedRows / totalRows) * 100), 100)
       : 0;
 
-    return { totalRows, processedRows, inserted, skipped, percent };
+    const percent = chunksTotal > 0 ? chunkPercent : rowPercent;
+
+    return { totalRows, processedRows, inserted, skipped, chunksTotal, chunksDone, percent };
   };
 
   const hasConnectionLost = Object.values(jobProgress).some((j) => j._connectionLost);
@@ -622,20 +611,27 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
                 </div>
               </div>
 
-              {/* Deterministic progress bar */}
-              {agg && agg.totalRows > 0 ? (
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-[10px] font-bold text-slate-500">
-                    <span>{formatNumber(agg.processedRows)} / {formatNumber(agg.totalRows)} rows</span>
-                    <span>{agg.percent}%</span>
-                  </div>
+              {/* Progress bar — indeterminate with percentage overlay */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-[10px] font-bold text-slate-500">
+                  <span>
+                    {agg && agg.processedRows > 0
+                      ? `${formatNumber(agg.processedRows)} rows processed`
+                      : 'Streaming data to database...'}
+                  </span>
+                  {agg && agg.percent > 0 && (
+                    <span className="tabular-nums">{agg.percent}%</span>
+                  )}
+                </div>
+                {/* Show indeterminate bar while chunks are in progress, determinate when we have % */}
+                {agg && agg.percent > 0 ? (
                   <Progress value={agg.percent} size="2" color="indigo" className="w-full h-2 rounded" />
-                </div>
-              ) : (
-                <div className="relative w-full h-2 bg-indigo-100/60 rounded-full overflow-hidden">
-                  <div className="absolute inset-0 bg-gradient-to-r from-indigo-400 via-blue-500 to-indigo-400 rounded-full animate-indeterminate" />
-                </div>
-              )}
+                ) : (
+                  <div className="relative w-full h-2 bg-indigo-100/60 rounded-full overflow-hidden">
+                    <div className="absolute inset-0 bg-gradient-to-r from-indigo-400 via-blue-500 to-indigo-400 rounded-full animate-indeterminate" />
+                  </div>
+                )}
+              </div>
 
               {/* Connection lost warning */}
               {hasConnectionLost && (
@@ -762,7 +758,7 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
                             ? 'bg-amber-50 text-amber-800 border-amber-100'
                             : 'bg-emerald-50 text-emerald-800 border-emerald-100'
                             }`}>
-                            {detail.inserted.toLocaleString()} ins / {detail.skipped.toLocaleString()} skip
+                            {detail.inserted.toLocaleString()} inserted / {detail.skipped.toLocaleString()} skipped
                           </span>
                         ) : (
                           <span className="text-[10px] bg-rose-50 text-rose-700 font-bold px-1.5 py-0.5 rounded border border-rose-100 truncate max-w-[150px]" title={detail.error}>
@@ -845,27 +841,27 @@ export const FileUploadZone = ({ onUploadSuccess }) => {
                   key={idx}
                   className="flex items-center justify-between gap-2 p-3.5 border border-slate-100 rounded-xl bg-white hover:bg-slate-50/50 transition-colors shadow-sm"
                 >
-                <div className="flex items-center space-x-3.5 min-w-0 flex-1">
-                  <div className="p-2 bg-slate-100 rounded-lg text-slate-500 flex-shrink-0">
-                    <FileText className="w-4 h-4" />
+                  <div className="flex items-center space-x-3.5 min-w-0 flex-1">
+                    <div className="p-2 bg-slate-100 rounded-lg text-slate-500 flex-shrink-0">
+                      <FileText className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-slate-800 truncate">{up.name}</p>
+                      <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
+                        {up.records} &bull; {up.time}
+                      </p>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold text-slate-800 truncate">{up.name}</p>
-                    <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
-                      {up.records} &bull; {up.time}
-                    </p>
+                  <div>
+                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded border ${up.status === "Completed"
+                      ? "bg-green-50 text-green-700 border-green-100"
+                      : up.status === "Warning"
+                        ? "bg-amber-50 text-amber-700 border-amber-100"
+                        : "bg-rose-50 text-rose-700 border-rose-100"
+                      }`}>
+                      {up.status}
+                    </span>
                   </div>
-                </div>
-                <div>
-                  <span className={`px-2 py-0.5 text-[10px] font-bold rounded border ${up.status === "Completed"
-                    ? "bg-green-50 text-green-700 border-green-100"
-                    : up.status === "Warning"
-                      ? "bg-amber-50 text-amber-700 border-amber-100"
-                      : "bg-rose-50 text-rose-700 border-rose-100"
-                    }`}>
-                    {up.status}
-                  </span>
-                </div>
                 </div>
               ))}
             </div>

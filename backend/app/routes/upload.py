@@ -34,7 +34,10 @@ async def upload_csv(
 
     jobs_created = []
 
+    # Looping in each file uploaded to disk
     for file in files:
+
+        # Checking if each file is valid csv
         if not file.filename or not file.filename.endswith('.csv'):
             jobs_created.append({
                 "filename": file.filename or "unknown",
@@ -44,6 +47,7 @@ async def upload_csv(
             continue
 
         file_size = file.size or 0
+        # checking if file size is not 0
         if file_size == 0:
             jobs_created.append({
                 "filename": file.filename,
@@ -53,10 +57,12 @@ async def upload_csv(
             continue
 
         try:
-            # Check for duplicate active upload
+            # Check for duplicate active upload, by checking the hash created using file name 
             existing_job = await find_active_job_by_fingerprint(
                 file.filename, file_size
             )
+
+            # Returns already running job for that file, it skips that whole file
             if existing_job:
                 jobs_created.append({
                     "filename": file.filename,
@@ -76,7 +82,7 @@ async def upload_csv(
                 str(config.UPLOAD_DIR), f"import_{job.job_id}.csv"
             )
             async with aiofiles.open(save_path, "wb") as out_file:
-                # Stream write in 2 MB chunks to avoid memory spike
+                # Stream write in 2 MB chunks of the massive file to avoid memory spike
                 await file.seek(0)
                 while True:
                     chunk = await file.read(2 * 1024 * 1024)
@@ -84,13 +90,16 @@ async def upload_csv(
                         break
                     await out_file.write(chunk)
 
+            # Update job status to uploading
             await update_job(job.job_id, status="uploading")
 
-            # Launch background processing task
+            # Launch background processing task using asyncio
+            # ------------------ Main entry point -----------------
             asyncio.create_task(
                 process_csv_from_file(save_path, job.job_id)
             )
 
+            # Appending created job to the list
             jobs_created.append({
                 "filename": file.filename,
                 "job_id": job.job_id,
